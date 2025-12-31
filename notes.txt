@@ -1,2 +1,3 @@
 movies should only be likable once
-ad login screnn there should be a create user. User can be created with name and password
+it should be possilbe to leave comments for all movies
+at login screen there should be a create user. User can be created with name and password

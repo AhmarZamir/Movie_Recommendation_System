@@ -155,9 +155,11 @@ def create_database():
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS user_interactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
         movie_title TEXT,
         action TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
     )
     ''')
     
@@ -266,8 +268,8 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
-def ensure_admin_user():
-    """Ensure admin user exists in database"""
+def ensure_tables_exist():
+    """Ensure all required tables exist in database"""
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -276,10 +278,9 @@ def ensure_admin_user():
         SELECT name FROM sqlite_master 
         WHERE type='table' AND name='users'
     ''')
-    table_exists = cursor.fetchone()
+    users_table_exists = cursor.fetchone()
     
-    if not table_exists:
-        # Create users table if it doesn't exist
+    if not users_table_exists:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -295,6 +296,75 @@ def ensure_admin_user():
         ''')
         conn.commit()
         print("✅ Created users table")
+    
+    # Check if comments table exists, if not create it
+    cursor.execute('''
+        SELECT name FROM sqlite_master 
+        WHERE type='table' AND name='comments'
+    ''')
+    comments_table_exists = cursor.fetchone()
+    
+    if not comments_table_exists:
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                movie_title TEXT,
+                comment_text TEXT NOT NULL,
+                rating REAL,
+                is_approved INTEGER DEFAULT 1,
+                is_flagged INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        ''')
+        conn.commit()
+        print("✅ Created comments table")
+    
+    # Check if admin_actions table exists, if not create it
+    cursor.execute('''
+        SELECT name FROM sqlite_master 
+        WHERE type='table' AND name='admin_actions'
+    ''')
+    admin_actions_table_exists = cursor.fetchone()
+    
+    if not admin_actions_table_exists:
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS admin_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id INTEGER,
+                action_type TEXT,
+                target_type TEXT,
+                target_id INTEGER,
+                details TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (admin_id) REFERENCES users(id)
+            )
+        ''')
+        conn.commit()
+        print("✅ Created admin_actions table")
+    
+    # Update user_interactions table to add user_id if it doesn't exist
+    cursor.execute("PRAGMA table_info(user_interactions)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if 'user_id' not in columns:
+        try:
+            cursor.execute('''
+                ALTER TABLE user_interactions 
+                ADD COLUMN user_id INTEGER
+            ''')
+            conn.commit()
+            print("✅ Added user_id column to user_interactions table")
+        except Exception as e:
+            print(f"Note: Could not add user_id column (might already exist): {e}")
+            pass  # Column might already exist
+    
+    conn.close()
+
+def ensure_admin_user():
+    """Ensure admin user exists in database"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
     
     # Check if admin user exists
     cursor.execute("SELECT * FROM users WHERE username = ?", ("admin",))
@@ -314,7 +384,8 @@ def ensure_admin_user():
     
     conn.close()
 
-# Ensure admin user exists (call after get_db_connection is defined)
+# Ensure all tables exist (call after get_db_connection is defined)
+ensure_tables_exist()
 ensure_admin_user()
 
 # Pydantic models
@@ -329,6 +400,7 @@ class MovieResponse(BaseModel):
 class LogRequest(BaseModel):
     movie_title: str
     action: str
+    user_id: Optional[int] = None
 
 class LoginRequest(BaseModel):
     username: str
@@ -364,6 +436,7 @@ class CommentCreate(BaseModel):
     movie_title: str
     comment_text: str
     rating: Optional[float] = None
+    user_id: Optional[int] = None
 
 # Authentication
 security = HTTPBasic()
@@ -500,24 +573,63 @@ def get_movie_poster(movie_id: int):
 
 @app.post("/log_interaction")
 def log_interaction(request: LogRequest):
-    """Log user interaction"""
+    """Log user interaction (prevents duplicate likes)"""
     conn = get_db_connection()
     cursor = conn.cursor()
     
     try:
-        cursor.execute(
-            "INSERT INTO user_interactions (movie_title, action) VALUES (?, ?)",
-            (request.movie_title, request.action)
-        )
+        # Check if user has already liked/disliked this movie
+        if request.user_id and request.action in ['like', 'dislike']:
+            cursor.execute(
+                "SELECT * FROM user_interactions WHERE user_id = ? AND movie_title = ? AND action IN ('like', 'dislike')",
+                (request.user_id, request.movie_title)
+            )
+            existing = cursor.fetchone()
+            if existing:
+                conn.close()
+                return {"status": "error", "message": f"You have already {existing['action']}d this movie"}
+        
+        # Insert interaction
+        if request.user_id:
+            cursor.execute(
+                "INSERT INTO user_interactions (user_id, movie_title, action) VALUES (?, ?, ?)",
+                (request.user_id, request.movie_title, request.action)
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO user_interactions (movie_title, action) VALUES (?, ?)",
+                (request.movie_title, request.action)
+            )
         
         conn.commit()
         return {"status": "success", "message": "Interaction logged"}
     
+    except sqlite3.IntegrityError as e:
+        # Unique constraint violation
+        conn.close()
+        return {"status": "error", "message": "You have already performed this action on this movie"}
     except Exception as e:
+        conn.close()
         return {"status": "error", "message": str(e)}
     
     finally:
-        conn.close()
+        if conn:
+            conn.close()
+
+@app.get("/user/{user_id}/liked/{movie_title}")
+def check_user_liked(user_id: int, movie_title: str):
+    """Check if user has liked a movie"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        "SELECT * FROM user_interactions WHERE user_id = ? AND movie_title = ? AND action = 'like'",
+        (user_id, movie_title)
+    )
+    liked = cursor.fetchone()
+    conn.close()
+    
+    return {"liked": liked is not None}
 
 @app.get("/popular")
 def get_popular_movies(limit: int = 10):
@@ -1104,10 +1216,13 @@ def get_analytics(admin: dict = Depends(get_admin_user)):
 # ============================================
 
 @app.post("/comments")
-def create_comment(comment_data: CommentCreate, user_id: int = 1):
-    """Create a comment/review (requires authentication in production)"""
+def create_comment(comment_data: CommentCreate):
+    """Create a comment/review"""
     conn = get_db_connection()
     cursor = conn.cursor()
+    
+    # Use user_id from request, default to 1 if not provided
+    user_id = comment_data.user_id if comment_data.user_id else 1
     
     cursor.execute('''
         INSERT INTO comments (user_id, movie_title, comment_text, rating, is_approved, is_flagged)

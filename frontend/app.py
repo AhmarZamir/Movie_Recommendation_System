@@ -268,11 +268,61 @@ def get_recommendations(movie_title):
 def log_action(movie_title, action):
     """Log user action to backend"""
     try:
-        requests.post(f"{BACKEND_URL}/log_interaction", 
-                     json={"movie_title": movie_title, "action": action},
+        user_id = st.session_state.user.get('id') if st.session_state.user else None
+        data = {"movie_title": movie_title, "action": action}
+        if user_id:
+            data["user_id"] = user_id
+        
+        response = requests.post(f"{BACKEND_URL}/log_interaction", 
+                     json=data,
                      timeout=2)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('status') == 'error':
+                return result.get('message', 'Error')
+        return "success"
+    except:
+        return None
+
+def check_user_liked(movie_title):
+    """Check if current user has liked a movie"""
+    if not st.session_state.user:
+        return False
+    try:
+        user_id = st.session_state.user.get('id')
+        response = requests.get(f"{BACKEND_URL}/user/{user_id}/liked/{movie_title}", timeout=2)
+        if response.status_code == 200:
+            return response.json().get('liked', False)
     except:
         pass
+    return False
+
+def create_comment(movie_title, comment_text, rating=None):
+    """Create a comment for a movie"""
+    try:
+        user_id = st.session_state.user.get('id') if st.session_state.user else None
+        data = {
+            "movie_title": movie_title,
+            "comment_text": comment_text,
+            "rating": rating
+        }
+        if user_id:
+            data["user_id"] = user_id
+        
+        response = requests.post(f"{BACKEND_URL}/comments", json=data, timeout=5)
+        return response.status_code == 200
+    except:
+        return False
+
+def get_movie_comments(movie_title):
+    """Get comments for a movie"""
+    try:
+        response = requests.get(f"{BACKEND_URL}/comments/{movie_title}", timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except:
+        return []
 
 def check_backend():
     """Check if backend is running"""
@@ -486,26 +536,68 @@ with st.container():
     
     # Login Page
     if st.session_state.page == 'login':
-        st.markdown("## 🔐 Login")
-        st.markdown("---")
+        login_tab, register_tab = st.tabs(["🔐 Login", "📝 Create User"])
         
-        with st.form("login_form"):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            submit = st.form_submit_button("Login", type="primary")
+        with login_tab:
+            st.markdown("### Login to your account")
+            st.markdown("---")
             
-            if submit:
-                result = login_user(username, password)
-                if result and result.get('status') == 'success':
-                    st.session_state.user = result['user']
-                    st.session_state.user['password'] = password  # Store for auth
-                    st.session_state.page = 'home'
-                    st.success("✅ Login successful!")
-                    st.rerun()
-                else:
-                    st.error("❌ Invalid username or password")
+            with st.form("login_form"):
+                username = st.text_input("Username")
+                password = st.text_input("Password", type="password")
+                submit = st.form_submit_button("Login", type="primary")
+                
+                if submit:
+                    result = login_user(username, password)
+                    if result and result.get('status') == 'success':
+                        st.session_state.user = result['user']
+                        st.session_state.user['password'] = password  # Store for auth
+                        st.session_state.page = 'home'
+                        st.success("✅ Login successful!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Invalid username or password")
+            
+            st.info("**Default Admin:** username: `admin`, password: `admin123`")
         
-        st.info("**Default Admin:** username: `admin`, password: `admin123`")
+        with register_tab:
+            st.markdown("### Create a new account")
+            st.markdown("---")
+            
+            with st.form("register_form"):
+                new_username = st.text_input("Username *")
+                new_email = st.text_input("Email *")
+                new_password = st.text_input("Password *", type="password")
+                confirm_password = st.text_input("Confirm Password *", type="password")
+                register_submit = st.form_submit_button("Create Account", type="primary")
+                
+                if register_submit:
+                    if not new_username or not new_email or not new_password:
+                        st.error("❌ Please fill in all required fields")
+                    elif new_password != confirm_password:
+                        st.error("❌ Passwords do not match")
+                    else:
+                        try:
+                            response = requests.post(
+                                f"{BACKEND_URL}/auth/register",
+                                json={
+                                    "username": new_username,
+                                    "email": new_email,
+                                    "password": new_password,
+                                    "role": "user"
+                                },
+                                timeout=5
+                            )
+                            if response.status_code == 200:
+                                st.success("✅ Account created successfully! Please login.")
+                                st.session_state.page = 'login'
+                                st.rerun()
+                            else:
+                                error_msg = response.json().get('detail', 'Error creating account')
+                                st.error(f"❌ {error_msg}")
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
+        
         if st.button("← Back to Home"):
             st.session_state.page = 'home'
             st.rerun()
@@ -799,6 +891,41 @@ with st.container():
         if st.session_state.selected_movie:
             st.success(f"✅ **SELECTED:** {st.session_state.selected_movie}")
             
+            # Comments section for selected movie
+            st.markdown("### 💬 Comments")
+            comments_selected = get_movie_comments(st.session_state.selected_movie)
+            if comments_selected:
+                for comment in comments_selected:
+                    with st.container():
+                        st.markdown(f"**{comment.get('username', 'Anonymous')}** ⭐ {comment.get('rating', 'N/A')}/10")
+                        st.write(comment.get('comment_text', ''))
+                        st.caption(f"Posted: {comment.get('created_at', '')}")
+                        st.markdown("---")
+            else:
+                st.info("No comments yet. Be the first to comment!")
+            
+            # Add comment form for selected movie
+            if st.session_state.user:
+                with st.expander("💬 Leave a comment", expanded=False):
+                    with st.form("comment_form_selected"):
+                        comment_text_selected = st.text_area("Your comment *")
+                        comment_rating_selected = st.slider("Rating (1-10)", 1, 10, 5, key="rating_selected")
+                        submit_comment_selected = st.form_submit_button("Submit Comment", type="primary")
+                        
+                        if submit_comment_selected:
+                            if comment_text_selected:
+                                if create_comment(st.session_state.selected_movie, comment_text_selected, float(comment_rating_selected)):
+                                    st.success("✅ Comment submitted!")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed to submit comment")
+                            else:
+                                st.error("❌ Please enter a comment")
+            else:
+                st.info("🔐 Please login to leave a comment")
+            
+            st.markdown("---")
+            
             # Get and display recommendations
             if st.button("🎯 GET RECOMMENDATIONS", type="primary", use_container_width=True):
                 with st.spinner("Analyzing preferences..."):
@@ -862,18 +989,59 @@ with st.container():
                         if movie.get('genres'):
                             st.caption(f"🎭 {movie['genres']}")
                         
-                        # Action buttons
-                        btn_col1, btn_col2 = st.columns(2)
-                        with btn_col1:
-                            if st.button("👍", key=f"like_{idx}"):
-                                log_action(movie['title'], "like")
-                                st.success("✓ Liked")
-                        with btn_col2:
-                            if st.button("👎", key=f"dislike_{idx}"):
-                                log_action(movie['title'], "dislike")
-                                st.info("✓ Disliked")
+                        # Action buttons - only show if user is logged in
+                        if st.session_state.user:
+                            btn_col1, btn_col2 = st.columns(2)
+                            user_liked = check_user_liked(movie['title'])
+                            
+                            with btn_col1:
+                                if user_liked:
+                                    st.button("👍 Liked", key=f"like_{idx}", disabled=True)
+                                else:
+                                    if st.button("👍", key=f"like_{idx}"):
+                                        result = log_action(movie['title'], "like")
+                                        if result == "success":
+                                            st.success("✓ Liked")
+                                            st.rerun()
+                                        elif result:
+                                            st.warning(result)
+                            with btn_col2:
+                                if st.button("💬 Comment", key=f"comment_btn_{idx}"):
+                                    st.session_state[f"show_comment_{idx}"] = not st.session_state.get(f"show_comment_{idx}", False)
+                                    st.rerun()
+                        else:
+                            st.info("🔐 Login to like and comment on movies")
                         
                         st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        # Comment form
+                        if st.session_state.user and st.session_state.get(f"show_comment_{idx}", False):
+                            with st.expander(f"💬 Leave a comment on {movie['title']}", expanded=True):
+                                with st.form(f"comment_form_{idx}"):
+                                    comment_text = st.text_area("Your comment *")
+                                    comment_rating = st.slider("Rating (1-10)", 1, 10, 5, key=f"rating_{idx}")
+                                    submit_comment = st.form_submit_button("Submit Comment", type="primary")
+                                    
+                                    if submit_comment:
+                                        if comment_text:
+                                            if create_comment(movie['title'], comment_text, float(comment_rating)):
+                                                st.success("✅ Comment submitted!")
+                                                st.session_state[f"show_comment_{idx}"] = False
+                                                st.rerun()
+                                            else:
+                                                st.error("❌ Failed to submit comment")
+                                        else:
+                                            st.error("❌ Please enter a comment")
+                        
+                        # Display comments for this movie
+                        comments = get_movie_comments(movie['title'])
+                        if comments:
+                            with st.expander(f"💬 View Comments ({len(comments)})"):
+                                for comment in comments[:5]:  # Show max 5 comments
+                                    st.markdown(f"**{comment.get('username', 'Anonymous')}** ({comment.get('rating', 'N/A')}/10)")
+                                    st.write(comment.get('comment_text', ''))
+                                    st.caption(f"Posted: {comment.get('created_at', '')}")
+                                    st.markdown("---")
     
     # If no movie selected, show all movies
     elif not st.session_state.selected_movie:
