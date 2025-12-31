@@ -1,0 +1,2 @@
+movies should only be likable once
+ad login screnn there should be a create user. User can be created with name and password

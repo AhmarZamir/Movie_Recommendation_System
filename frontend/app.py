@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
+import sqlite3
 
 # Backend URL
 BACKEND_URL = "http://localhost:8000"
@@ -238,6 +239,10 @@ if 'selected_movie' not in st.session_state:
     st.session_state.selected_movie = ""
 if 'all_movies' not in st.session_state:
     st.session_state.all_movies = []
+if 'user' not in st.session_state:
+    st.session_state.user = None
+if 'page' not in st.session_state:
+    st.session_state.page = 'home'
 
 def get_all_movies():
     """Get all movies from backend"""
@@ -277,6 +282,162 @@ def check_backend():
     except:
         return False
 
+def login_user(username, password):
+    """Login user"""
+    try:
+        response = requests.post(
+            f"{BACKEND_URL}/auth/login",
+            json={"username": username, "password": password},
+            timeout=5
+        )
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except:
+        return None
+
+def logout_user():
+    """Logout user"""
+    st.session_state.user = None
+    st.session_state.page = 'home'
+    st.rerun()
+
+# Admin API functions
+def get_admin_users():
+    """Get all users (Admin)"""
+    try:
+        auth = (st.session_state.user['username'], st.session_state.user.get('password', ''))
+        response = requests.get(f"{BACKEND_URL}/admin/users", auth=auth, timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except:
+        return []
+
+def update_admin_user(user_id, updates):
+    """Update user (Admin)"""
+    try:
+        auth = (st.session_state.user['username'], st.session_state.user.get('password', ''))
+        response = requests.put(
+            f"{BACKEND_URL}/admin/users/{user_id}",
+            json=updates,
+            auth=auth,
+            timeout=5
+        )
+        return response.status_code == 200
+    except:
+        return False
+
+def delete_admin_user(user_id):
+    """Delete user (Admin)"""
+    try:
+        auth = (st.session_state.user['username'], st.session_state.user.get('password', ''))
+        response = requests.delete(f"{BACKEND_URL}/admin/users/{user_id}", auth=auth, timeout=5)
+        return response.status_code == 200
+    except:
+        return False
+
+def block_admin_user(user_id):
+    """Block/unblock user (Admin)"""
+    try:
+        auth = (st.session_state.user['username'], st.session_state.user.get('password', ''))
+        response = requests.post(f"{BACKEND_URL}/admin/users/{user_id}/block", auth=auth, timeout=5)
+        return response.status_code == 200
+    except:
+        return False
+
+def get_admin_movies():
+    """Get all movies from database (Admin)"""
+    try:
+        auth = (st.session_state.user['username'], st.session_state.user.get('password', ''))
+        response = requests.get(f"{BACKEND_URL}/admin/movies", auth=auth, timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except:
+        return []
+
+def create_admin_movie(movie_data):
+    """Create movie (Admin)"""
+    try:
+        auth = (st.session_state.user['username'], st.session_state.user.get('password', ''))
+        response = requests.post(
+            f"{BACKEND_URL}/admin/movies",
+            json=movie_data,
+            auth=auth,
+            timeout=5
+        )
+        return response.status_code == 200
+    except:
+        return False
+
+def update_admin_movie(movie_id, updates):
+    """Update movie (Admin)"""
+    try:
+        auth = (st.session_state.user['username'], st.session_state.user.get('password', ''))
+        response = requests.put(
+            f"{BACKEND_URL}/admin/movies/{movie_id}",
+            json=updates,
+            auth=auth,
+            timeout=5
+        )
+        return response.status_code == 200
+    except:
+        return False
+
+def delete_admin_movie(movie_id):
+    """Delete movie (Admin)"""
+    try:
+        auth = (st.session_state.user['username'], st.session_state.user.get('password', ''))
+        response = requests.delete(f"{BACKEND_URL}/admin/movies/{movie_id}", auth=auth, timeout=5)
+        return response.status_code == 200
+    except:
+        return False
+
+def get_admin_comments(flagged_only=False):
+    """Get comments (Admin)"""
+    try:
+        auth = (st.session_state.user['username'], st.session_state.user.get('password', ''))
+        response = requests.get(
+            f"{BACKEND_URL}/admin/comments?flagged_only={flagged_only}",
+            auth=auth,
+            timeout=5
+        )
+        if response.status_code == 200:
+            return response.json()
+        return []
+    except:
+        return []
+
+def delete_admin_comment(comment_id):
+    """Delete comment (Admin)"""
+    try:
+        auth = (st.session_state.user['username'], st.session_state.user.get('password', ''))
+        response = requests.delete(f"{BACKEND_URL}/admin/comments/{comment_id}", auth=auth, timeout=5)
+        return response.status_code == 200
+    except:
+        return False
+
+def flag_admin_comment(comment_id):
+    """Flag comment (Admin)"""
+    try:
+        auth = (st.session_state.user['username'], st.session_state.user.get('password', ''))
+        response = requests.post(f"{BACKEND_URL}/admin/comments/{comment_id}/flag", auth=auth, timeout=5)
+        return response.status_code == 200
+    except:
+        return False
+
+def get_admin_analytics():
+    """Get analytics (Admin)"""
+    try:
+        auth = (st.session_state.user['username'], st.session_state.user.get('password', ''))
+        response = requests.get(f"{BACKEND_URL}/admin/analytics", auth=auth, timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except:
+        return None
+
 # Main container
 with st.container():
     st.markdown('<div class="main-container">', unsafe_allow_html=True)
@@ -299,6 +460,264 @@ with st.container():
         
         Wait for "Application startup complete" then refresh.
         """)
+        st.stop()
+    
+    # Navigation and Authentication
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1:
+        pass
+    with col2:
+        if st.session_state.user:
+            if st.button("🏠 Home"):
+                st.session_state.page = 'home'
+                st.rerun()
+        else:
+            if st.button("🔐 Login"):
+                st.session_state.page = 'login'
+                st.rerun()
+    with col3:
+        if st.session_state.user:
+            if st.session_state.user.get('role') == 'admin':
+                if st.button("⚙️ Admin"):
+                    st.session_state.page = 'admin'
+                    st.rerun()
+            if st.button("🚪 Logout"):
+                logout_user()
+    
+    # Login Page
+    if st.session_state.page == 'login':
+        st.markdown("## 🔐 Login")
+        st.markdown("---")
+        
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Login", type="primary")
+            
+            if submit:
+                result = login_user(username, password)
+                if result and result.get('status') == 'success':
+                    st.session_state.user = result['user']
+                    st.session_state.user['password'] = password  # Store for auth
+                    st.session_state.page = 'home'
+                    st.success("✅ Login successful!")
+                    st.rerun()
+                else:
+                    st.error("❌ Invalid username or password")
+        
+        st.info("**Default Admin:** username: `admin`, password: `admin123`")
+        if st.button("← Back to Home"):
+            st.session_state.page = 'home'
+            st.rerun()
+        st.stop()
+    
+    # Admin Panel
+    if st.session_state.page == 'admin':
+        if not st.session_state.user or st.session_state.user.get('role') != 'admin':
+            st.error("❌ Admin access required. Please login as admin.")
+            if st.button("Go to Login"):
+                st.session_state.page = 'login'
+                st.rerun()
+            st.stop()
+        
+        st.markdown("## ⚙️ Admin Panel")
+        st.markdown("---")
+        
+        admin_tab1, admin_tab2, admin_tab3, admin_tab4 = st.tabs([
+            "👥 Manage Users", "🎬 Manage Movies", "💬 Moderate Comments", "📊 Analytics"
+        ])
+        
+        # Tab 1: Manage Users
+        with admin_tab1:
+            st.markdown("### 👥 User Management")
+            
+            users = get_admin_users()
+            if users:
+                df_users = pd.DataFrame(users)
+                st.dataframe(df_users, use_container_width=True, hide_index=True)
+                
+                st.markdown("#### Update User")
+                user_id = st.number_input("User ID", min_value=1, step=1)
+                if user_id:
+                    user = next((u for u in users if u['id'] == user_id), None)
+                    if user:
+                        with st.form(f"update_user_{user_id}"):
+                            new_username = st.text_input("Username", value=user['username'])
+                            new_email = st.text_input("Email", value=user['email'])
+                            new_role = st.selectbox("Role", ["user", "admin"], index=0 if user['role'] == 'user' else 1)
+                            is_active = st.checkbox("Active", value=bool(user['is_active']))
+                            is_blocked = st.checkbox("Blocked", value=bool(user['is_blocked']))
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.form_submit_button("Update User", type="primary"):
+                                    if update_admin_user(user_id, {
+                                        "username": new_username,
+                                        "email": new_email,
+                                        "role": new_role,
+                                        "is_active": is_active,
+                                        "is_blocked": is_blocked
+                                    }):
+                                        st.success("✅ User updated!")
+                                        st.rerun()
+                            with col2:
+                                if st.form_submit_button("Block/Unblock"):
+                                    if block_admin_user(user_id):
+                                        st.success("✅ User status updated!")
+                                        st.rerun()
+                                if st.form_submit_button("Delete User"):
+                                    if delete_admin_user(user_id):
+                                        st.success("✅ User deleted!")
+                                        st.rerun()
+            else:
+                st.info("No users found")
+        
+        # Tab 2: Manage Movies
+        with admin_tab2:
+            st.markdown("### 🎬 Movie Management")
+            
+            tab2_col1, tab2_col2 = st.columns(2)
+            
+            with tab2_col1:
+                st.markdown("#### Add New Movie")
+                with st.form("add_movie_form"):
+                    new_title = st.text_input("Title *")
+                    new_movie_id = st.number_input("Movie ID", min_value=1, step=1)
+                    new_genres = st.text_input("Genres (separated by |)")
+                    new_rating = st.number_input("Rating", min_value=0.0, max_value=10.0, step=0.1)
+                    new_overview = st.text_area("Overview")
+                    
+                    if st.form_submit_button("Add Movie", type="primary"):
+                        if new_title:
+                            if create_admin_movie({
+                                "title": new_title,
+                                "movie_id": int(new_movie_id) if new_movie_id else None,
+                                "genres": new_genres if new_genres else None,
+                                "rating": float(new_rating) if new_rating else None,
+                                "overview": new_overview if new_overview else None
+                            }):
+                                st.success("✅ Movie added!")
+                                st.rerun()
+                        else:
+                            st.error("Title is required")
+            
+            with tab2_col2:
+                st.markdown("#### Existing Movies")
+                movies = get_admin_movies()
+                if movies:
+                    movie_df = pd.DataFrame(movies)
+                    st.dataframe(movie_df[['id', 'title', 'genres', 'rating']], use_container_width=True, hide_index=True)
+                    
+                    st.markdown("#### Update/Delete Movie")
+                    movie_to_manage = st.selectbox("Select movie", [m['title'] for m in movies])
+                    if movie_to_manage:
+                        selected_movie = next((m for m in movies if m['title'] == movie_to_manage), None)
+                        if selected_movie:
+                            with st.form(f"manage_movie_{selected_movie['id']}"):
+                                update_title = st.text_input("Title", value=selected_movie.get('title', ''))
+                                update_genres = st.text_input("Genres", value=selected_movie.get('genres', ''))
+                                update_rating = st.number_input("Rating", value=float(selected_movie.get('rating', 0)), min_value=0.0, max_value=10.0, step=0.1)
+                                update_overview = st.text_area("Overview", value=selected_movie.get('overview', ''))
+                                
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    if st.form_submit_button("Update Movie", type="primary"):
+                                        if update_admin_movie(selected_movie['id'], {
+                                            "title": update_title,
+                                            "genres": update_genres,
+                                            "rating": update_rating,
+                                            "overview": update_overview
+                                        }):
+                                            st.success("✅ Movie updated!")
+                                            st.rerun()
+                                with col2:
+                                    if st.form_submit_button("Delete Movie"):
+                                        if delete_admin_movie(selected_movie['id']):
+                                            st.success("✅ Movie deleted!")
+                                            st.rerun()
+        
+        # Tab 3: Moderate Comments
+        with admin_tab3:
+            st.markdown("### 💬 Comment Moderation")
+            
+            show_flagged = st.checkbox("Show only flagged comments")
+            comments = get_admin_comments(flagged_only=show_flagged)
+            
+            if comments:
+                for comment in comments:
+                    with st.expander(f"Comment #{comment['id']} - {comment.get('username', 'Unknown')} on {comment['movie_title']}"):
+                        st.write(f"**Comment:** {comment['comment_text']}")
+                        if comment.get('rating'):
+                            st.write(f"**Rating:** {comment['rating']}/10")
+                        st.write(f"**Created:** {comment['created_at']}")
+                        st.write(f"**Flagged:** {'Yes' if comment['is_flagged'] else 'No'}")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            if st.button(f"Flag/Unflag", key=f"flag_{comment['id']}"):
+                                if flag_admin_comment(comment['id']):
+                                    st.success("✅ Comment status updated!")
+                                    st.rerun()
+                        with col2:
+                            if st.button(f"Delete", key=f"delete_{comment['id']}"):
+                                if delete_admin_comment(comment['id']):
+                                    st.success("✅ Comment deleted!")
+                                    st.rerun()
+            else:
+                st.info("No comments found")
+        
+        # Tab 4: Analytics
+        with admin_tab4:
+            st.markdown("### 📊 Analytics & Reports")
+            
+            analytics = get_admin_analytics()
+            if analytics:
+                # System Usage
+                st.markdown("#### System Usage")
+                usage = analytics['system_usage']
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Users", usage['total_users'])
+                    st.metric("Active Users", usage['active_users'])
+                with col2:
+                    st.metric("Blocked Users", usage['blocked_users'])
+                    st.metric("Total Movies", usage['total_movies'])
+                with col3:
+                    st.metric("Total Interactions", usage['total_interactions'])
+                    st.metric("Total Comments", usage['total_comments'])
+                with col4:
+                    st.metric("Flagged Comments", usage['flagged_comments'])
+                
+                # Top Rated Movies
+                st.markdown("#### Top Rated Movies")
+                if analytics['top_rated_movies']:
+                    top_movies_df = pd.DataFrame(analytics['top_rated_movies'])
+                    st.dataframe(top_movies_df, use_container_width=True, hide_index=True)
+                
+                # Trending Genres
+                st.markdown("#### Trending Genres")
+                if analytics['trending_genres']:
+                    genres_df = pd.DataFrame(analytics['trending_genres'])
+                    st.dataframe(genres_df, use_container_width=True, hide_index=True)
+                
+                # User Engagement
+                st.markdown("#### User Engagement")
+                engagement = analytics['user_engagement']
+                st.metric("Unique Movies Viewed", engagement.get('unique_movies_viewed', 0))
+                st.metric("Total Interactions", engagement.get('total_interactions', 0))
+                
+                # Recent Admin Actions
+                st.markdown("#### Recent Admin Actions")
+                if analytics['recent_admin_actions']:
+                    actions_df = pd.DataFrame(analytics['recent_admin_actions'])
+                    st.dataframe(actions_df[['admin_username', 'action_type', 'target_type', 'timestamp']], 
+                               use_container_width=True, hide_index=True)
+            else:
+                st.error("Failed to load analytics")
+        
+        if st.button("← Back to Home"):
+            st.session_state.page = 'home'
+            st.rerun()
         st.stop()
     
     # Get all movies for dropdown

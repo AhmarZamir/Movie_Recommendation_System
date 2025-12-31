@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 import pickle
 import pandas as pd
@@ -9,6 +10,8 @@ from typing import List, Optional
 import os
 import requests
 import json
+import hashlib
+from datetime import datetime
 
 # ============================================
 # CREATE NECESSARY FILES IF THEY DON'T EXIST
@@ -142,7 +145,9 @@ def create_database():
         movie_id INTEGER,
         genres TEXT,
         rating REAL,
-        overview TEXT
+        overview TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     ''')
     
@@ -155,6 +160,58 @@ def create_database():
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     ''')
+    
+    # Create users table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT DEFAULT 'user',
+        is_active INTEGER DEFAULT 1,
+        is_blocked INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_login DATETIME
+    )
+    ''')
+    
+    # Create comments/reviews table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS comments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        movie_title TEXT,
+        comment_text TEXT NOT NULL,
+        rating REAL,
+        is_approved INTEGER DEFAULT 1,
+        is_flagged INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    ''')
+    
+    # Create admin actions log
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS admin_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        admin_id INTEGER,
+        action_type TEXT,
+        target_type TEXT,
+        target_id INTEGER,
+        details TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (admin_id) REFERENCES users(id)
+    )
+    ''')
+    
+    # Insert default admin user (username: admin, password: admin123)
+    # In production, use proper password hashing
+    admin_password_hash = hashlib.sha256("admin123".encode()).hexdigest()
+    cursor.execute('''
+        INSERT OR IGNORE INTO users (username, email, password_hash, role, is_active)
+        VALUES (?, ?, ?, ?, ?)
+    ''', ("admin", "admin@movieapp.com", admin_password_hash, "admin", 1))
     
     # Insert sample data from movies.csv
     if os.path.exists('data/movies.csv'):
@@ -209,6 +266,57 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+def ensure_admin_user():
+    """Ensure admin user exists in database"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Check if users table exists, if not create it
+    cursor.execute('''
+        SELECT name FROM sqlite_master 
+        WHERE type='table' AND name='users'
+    ''')
+    table_exists = cursor.fetchone()
+    
+    if not table_exists:
+        # Create users table if it doesn't exist
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT DEFAULT 'user',
+                is_active INTEGER DEFAULT 1,
+                is_blocked INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_login DATETIME
+            )
+        ''')
+        conn.commit()
+        print("✅ Created users table")
+    
+    # Check if admin user exists
+    cursor.execute("SELECT * FROM users WHERE username = ?", ("admin",))
+    admin_user = cursor.fetchone()
+    
+    if not admin_user:
+        # Create admin user
+        admin_password_hash = hashlib.sha256("admin123".encode()).hexdigest()
+        cursor.execute('''
+            INSERT INTO users (username, email, password_hash, role, is_active)
+            VALUES (?, ?, ?, ?, ?)
+        ''', ("admin", "admin@movieapp.com", admin_password_hash, "admin", 1))
+        conn.commit()
+        print("✅ Created admin user (username: admin, password: admin123)")
+    else:
+        print("✅ Admin user already exists")
+    
+    conn.close()
+
+# Ensure admin user exists (call after get_db_connection is defined)
+ensure_admin_user()
+
 # Pydantic models
 class MovieResponse(BaseModel):
     title: str
@@ -221,6 +329,86 @@ class MovieResponse(BaseModel):
 class LogRequest(BaseModel):
     movie_title: str
     action: str
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class UserCreate(BaseModel):
+    username: str
+    email: str
+    password: str
+    role: Optional[str] = "user"
+
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    email: Optional[str] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+    is_blocked: Optional[bool] = None
+
+class MovieCreate(BaseModel):
+    title: str
+    movie_id: Optional[int] = None
+    genres: Optional[str] = None
+    rating: Optional[float] = None
+    overview: Optional[str] = None
+
+class MovieUpdate(BaseModel):
+    title: Optional[str] = None
+    genres: Optional[str] = None
+    rating: Optional[float] = None
+    overview: Optional[str] = None
+
+class CommentCreate(BaseModel):
+    movie_title: str
+    comment_text: str
+    rating: Optional[float] = None
+
+# Authentication
+security = HTTPBasic()
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(password: str, password_hash: str) -> bool:
+    return hash_password(password) == password_hash
+
+def get_current_user(credentials: HTTPBasicCredentials = Depends(security)):
+    """Get current authenticated user"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM users WHERE username = ?", (credentials.username,))
+    user = cursor.fetchone()
+    conn.close()
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    if not verify_password(credentials.password, user['password_hash']):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    if user['is_blocked']:
+        raise HTTPException(status_code=403, detail="Account is blocked")
+    
+    if not user['is_active']:
+        raise HTTPException(status_code=403, detail="Account is inactive")
+    
+    # Update last login
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET last_login = ? WHERE id = ?", (datetime.now(), user['id']))
+    conn.commit()
+    conn.close()
+    
+    return dict(user)
+
+def get_admin_user(current_user: dict = Depends(get_current_user)):
+    """Verify user is admin"""
+    if current_user['role'] != 'admin':
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
 
 # ============================================
 # API ENDPOINTS
@@ -354,6 +542,602 @@ def get_stats():
         "similarity_matrix_shape": similarity_matrix.shape,
         "sample_movies": list(movies_df['title'].head(5))
     }
+
+# ============================================
+# AUTHENTICATION ENDPOINTS
+# ============================================
+
+@app.post("/auth/login")
+def login(request: LoginRequest):
+    """Login endpoint"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM users WHERE username = ?", (request.username,))
+    user = cursor.fetchone()
+    conn.close()
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    if not verify_password(request.password, user['password_hash']):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    if user['is_blocked']:
+        raise HTTPException(status_code=403, detail="Account is blocked")
+    
+    if not user['is_active']:
+        raise HTTPException(status_code=403, detail="Account is inactive")
+    
+    # Update last login
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET last_login = ? WHERE id = ?", (datetime.now(), user['id']))
+    conn.commit()
+    conn.close()
+    
+    return {
+        "status": "success",
+        "user": {
+            "id": user['id'],
+            "username": user['username'],
+            "email": user['email'],
+            "role": user['role'],
+            "is_active": bool(user['is_active']),
+            "is_blocked": bool(user['is_blocked'])
+        }
+    }
+
+@app.post("/auth/register")
+def register(user_data: UserCreate):
+    """Register new user"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Check if username or email exists
+    cursor.execute("SELECT * FROM users WHERE username = ? OR email = ?", 
+                   (user_data.username, user_data.email))
+    if cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=400, detail="Username or email already exists")
+    
+    # Create user
+    password_hash = hash_password(user_data.password)
+    cursor.execute('''
+        INSERT INTO users (username, email, password_hash, role, is_active)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (user_data.username, user_data.email, password_hash, user_data.role, 1))
+    
+    conn.commit()
+    user_id = cursor.lastrowid
+    conn.close()
+    
+    return {"status": "success", "message": "User created successfully", "user_id": user_id}
+
+@app.get("/auth/debug/admin")
+def debug_admin_user():
+    """Debug endpoint to check admin user (for troubleshooting)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Check if users table exists
+    cursor.execute('''
+        SELECT name FROM sqlite_master 
+        WHERE type='table' AND name='users'
+    ''')
+    table_exists = cursor.fetchone()
+    
+    if not table_exists:
+        return {
+            "error": "Users table does not exist",
+            "action": "Restart the backend server to create the table"
+        }
+    
+    # Get admin user
+    cursor.execute("SELECT id, username, email, role, is_active, is_blocked FROM users WHERE username = ?", ("admin",))
+    admin_user = cursor.fetchone()
+    
+    conn.close()
+    
+    if not admin_user:
+        # Try to create admin user
+        ensure_admin_user()
+        return {
+            "status": "Admin user was missing, attempting to create...",
+            "action": "Please try logging in again"
+        }
+    
+    # Test password hash
+    test_password = "admin123"
+    expected_hash = hashlib.sha256(test_password.encode()).hexdigest()
+    
+    # Get stored hash (we already have admin_user, but need to get password_hash)
+    conn2 = get_db_connection()
+    cursor2 = conn2.cursor()
+    cursor2.execute("SELECT password_hash FROM users WHERE username = ?", ("admin",))
+    stored_hash_row = cursor2.fetchone()
+    stored_hash = stored_hash_row['password_hash'] if stored_hash_row else None
+    conn2.close()
+    
+    return {
+        "admin_user_exists": True,
+        "admin_user": dict(admin_user),
+        "password_test": {
+            "expected_hash": expected_hash,
+            "stored_hash": stored_hash,
+            "match": expected_hash == stored_hash if stored_hash else False
+        },
+        "login_credentials": {
+            "username": "admin",
+            "password": "admin123"
+        }
+    }
+
+# ============================================
+# ADMIN ENDPOINTS - USER MANAGEMENT
+# ============================================
+
+@app.get("/admin/users")
+def get_all_users(admin: dict = Depends(get_admin_user)):
+    """Get all users (Admin only)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, username, email, role, is_active, is_blocked, created_at, last_login FROM users")
+    users = cursor.fetchall()
+    conn.close()
+    
+    return [dict(user) for user in users]
+
+@app.get("/admin/users/{user_id}")
+def get_user(user_id: int, admin: dict = Depends(get_admin_user)):
+    """Get user by ID (Admin only)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, username, email, role, is_active, is_blocked, created_at, last_login FROM users WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return dict(user)
+
+@app.put("/admin/users/{user_id}")
+def update_user(user_id: int, user_update: UserUpdate, admin: dict = Depends(get_admin_user)):
+    """Update user (Admin only)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Check if user exists
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
+    if not user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Build update query
+    updates = []
+    values = []
+    
+    if user_update.username is not None:
+        updates.append("username = ?")
+        values.append(user_update.username)
+    if user_update.email is not None:
+        updates.append("email = ?")
+        values.append(user_update.email)
+    if user_update.role is not None:
+        updates.append("role = ?")
+        values.append(user_update.role)
+    if user_update.is_active is not None:
+        updates.append("is_active = ?")
+        values.append(1 if user_update.is_active else 0)
+    if user_update.is_blocked is not None:
+        updates.append("is_blocked = ?")
+        values.append(1 if user_update.is_blocked else 0)
+    
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(datetime.now())
+        values.append(user_id)
+        
+        query = f"UPDATE users SET {', '.join(updates)} WHERE id = ?"
+        cursor.execute(query, values)
+        conn.commit()
+        
+        # Log admin action
+        cursor.execute('''
+            INSERT INTO admin_actions (admin_id, action_type, target_type, target_id, details)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (admin['id'], 'update_user', 'user', user_id, f"Updated user {user_id}"))
+        conn.commit()
+    
+    conn.close()
+    return {"status": "success", "message": "User updated successfully"}
+
+@app.delete("/admin/users/{user_id}")
+def delete_user(user_id: int, admin: dict = Depends(get_admin_user)):
+    """Delete user (Admin only)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
+    if not user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    conn.commit()
+    
+    # Log admin action
+    cursor.execute('''
+        INSERT INTO admin_actions (admin_id, action_type, target_type, target_id, details)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (admin['id'], 'delete_user', 'user', user_id, f"Deleted user {user_id}"))
+    conn.commit()
+    
+    conn.close()
+    return {"status": "success", "message": "User deleted successfully"}
+
+@app.post("/admin/users/{user_id}/block")
+def block_user(user_id: int, admin: dict = Depends(get_admin_user)):
+    """Block/unblock user (Admin only)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
+    if not user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    new_blocked_status = 0 if user['is_blocked'] else 1
+    cursor.execute("UPDATE users SET is_blocked = ? WHERE id = ?", (new_blocked_status, user_id))
+    conn.commit()
+    
+    # Log admin action
+    action = 'unblock_user' if new_blocked_status == 0 else 'block_user'
+    cursor.execute('''
+        INSERT INTO admin_actions (admin_id, action_type, target_type, target_id, details)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (admin['id'], action, 'user', user_id, f"{action} {user_id}"))
+    conn.commit()
+    
+    conn.close()
+    return {"status": "success", "message": f"User {'blocked' if new_blocked_status else 'unblocked'} successfully"}
+
+# ============================================
+# ADMIN ENDPOINTS - MOVIE MANAGEMENT
+# ============================================
+
+@app.get("/admin/movies")
+def get_admin_movies_list(admin: dict = Depends(get_admin_user)):
+    """Get all movies from database (Admin only)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM movies ORDER BY title")
+    movies = cursor.fetchall()
+    conn.close()
+    return [dict(movie) for movie in movies]
+
+@app.post("/admin/movies")
+def create_movie(movie_data: MovieCreate, admin: dict = Depends(get_admin_user)):
+    """Add new movie (Admin only)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT INTO movies (title, movie_id, genres, rating, overview)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (movie_data.title, movie_data.movie_id, movie_data.genres, movie_data.rating, movie_data.overview))
+    
+    conn.commit()
+    movie_id = cursor.lastrowid
+    
+    # Log admin action
+    cursor.execute('''
+        INSERT INTO admin_actions (admin_id, action_type, target_type, target_id, details)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (admin['id'], 'create_movie', 'movie', movie_id, f"Created movie: {movie_data.title}"))
+    conn.commit()
+    
+    conn.close()
+    
+    # Reload movies_df
+    global movies_df
+    movies_df = pd.read_csv('data/movies.csv')
+    
+    return {"status": "success", "message": "Movie created successfully", "movie_id": movie_id}
+
+@app.put("/admin/movies/{movie_id}")
+def update_movie(movie_id: int, movie_update: MovieUpdate, admin: dict = Depends(get_admin_user)):
+    """Update movie (Admin only)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM movies WHERE id = ?", (movie_id,))
+    movie = cursor.fetchone()
+    if not movie:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Movie not found")
+    
+    # Build update query
+    updates = []
+    values = []
+    
+    if movie_update.title is not None:
+        updates.append("title = ?")
+        values.append(movie_update.title)
+    if movie_update.genres is not None:
+        updates.append("genres = ?")
+        values.append(movie_update.genres)
+    if movie_update.rating is not None:
+        updates.append("rating = ?")
+        values.append(movie_update.rating)
+    if movie_update.overview is not None:
+        updates.append("overview = ?")
+        values.append(movie_update.overview)
+    
+    if updates:
+        updates.append("updated_at = ?")
+        values.append(datetime.now())
+        values.append(movie_id)
+        
+        query = f"UPDATE movies SET {', '.join(updates)} WHERE id = ?"
+        cursor.execute(query, values)
+        conn.commit()
+        
+        # Log admin action
+        cursor.execute('''
+            INSERT INTO admin_actions (admin_id, action_type, target_type, target_id, details)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (admin['id'], 'update_movie', 'movie', movie_id, f"Updated movie {movie_id}"))
+        conn.commit()
+    
+    conn.close()
+    return {"status": "success", "message": "Movie updated successfully"}
+
+@app.delete("/admin/movies/{movie_id}")
+def delete_movie(movie_id: int, admin: dict = Depends(get_admin_user)):
+    """Delete movie (Admin only)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM movies WHERE id = ?", (movie_id,))
+    movie = cursor.fetchone()
+    if not movie:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Movie not found")
+    
+    cursor.execute("DELETE FROM movies WHERE id = ?", (movie_id,))
+    conn.commit()
+    
+    # Log admin action
+    cursor.execute('''
+        INSERT INTO admin_actions (admin_id, action_type, target_type, target_id, details)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (admin['id'], 'delete_movie', 'movie', movie_id, f"Deleted movie {movie_id}"))
+    conn.commit()
+    
+    conn.close()
+    return {"status": "success", "message": "Movie deleted successfully"}
+
+# ============================================
+# ADMIN ENDPOINTS - COMMENT MODERATION
+# ============================================
+
+@app.get("/admin/comments")
+def get_all_comments(admin: dict = Depends(get_admin_user), flagged_only: bool = False):
+    """Get all comments (Admin only)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    if flagged_only:
+        cursor.execute('''
+            SELECT c.*, u.username 
+            FROM comments c
+            LEFT JOIN users u ON c.user_id = u.id
+            WHERE c.is_flagged = 1
+            ORDER BY c.created_at DESC
+        ''')
+    else:
+        cursor.execute('''
+            SELECT c.*, u.username 
+            FROM comments c
+            LEFT JOIN users u ON c.user_id = u.id
+            ORDER BY c.created_at DESC
+        ''')
+    
+    comments = cursor.fetchall()
+    conn.close()
+    
+    return [dict(comment) for comment in comments]
+
+@app.delete("/admin/comments/{comment_id}")
+def delete_comment(comment_id: int, admin: dict = Depends(get_admin_user)):
+    """Delete comment (Admin only)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM comments WHERE id = ?", (comment_id,))
+    comment = cursor.fetchone()
+    if not comment:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Comment not found")
+    
+    cursor.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
+    conn.commit()
+    
+    # Log admin action
+    cursor.execute('''
+        INSERT INTO admin_actions (admin_id, action_type, target_type, target_id, details)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (admin['id'], 'delete_comment', 'comment', comment_id, f"Deleted comment {comment_id}"))
+    conn.commit()
+    
+    conn.close()
+    return {"status": "success", "message": "Comment deleted successfully"}
+
+@app.post("/admin/comments/{comment_id}/flag")
+def flag_comment(comment_id: int, admin: dict = Depends(get_admin_user)):
+    """Flag/unflag comment (Admin only)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM comments WHERE id = ?", (comment_id,))
+    comment = cursor.fetchone()
+    if not comment:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Comment not found")
+    
+    new_flag_status = 0 if comment['is_flagged'] else 1
+    cursor.execute("UPDATE comments SET is_flagged = ? WHERE id = ?", (new_flag_status, comment_id))
+    conn.commit()
+    
+    # Log admin action
+    action = 'unflag_comment' if new_flag_status == 0 else 'flag_comment'
+    cursor.execute('''
+        INSERT INTO admin_actions (admin_id, action_type, target_type, target_id, details)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (admin['id'], action, 'comment', comment_id, f"{action} {comment_id}"))
+    conn.commit()
+    
+    conn.close()
+    return {"status": "success", "message": f"Comment {'flagged' if new_flag_status else 'unflagged'} successfully"}
+
+# ============================================
+# ADMIN ENDPOINTS - ANALYTICS & REPORTS
+# ============================================
+
+@app.get("/admin/analytics")
+def get_analytics(admin: dict = Depends(get_admin_user)):
+    """Get system analytics (Admin only)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Total users
+    cursor.execute("SELECT COUNT(*) as total FROM users")
+    total_users = cursor.fetchone()['total']
+    
+    # Active users
+    cursor.execute("SELECT COUNT(*) as total FROM users WHERE is_active = 1")
+    active_users = cursor.fetchone()['total']
+    
+    # Blocked users
+    cursor.execute("SELECT COUNT(*) as total FROM users WHERE is_blocked = 1")
+    blocked_users = cursor.fetchone()['total']
+    
+    # Total movies
+    cursor.execute("SELECT COUNT(*) as total FROM movies")
+    total_movies = cursor.fetchone()['total']
+    
+    # Total interactions
+    cursor.execute("SELECT COUNT(*) as total FROM user_interactions")
+    total_interactions = cursor.fetchone()['total']
+    
+    # Total comments
+    cursor.execute("SELECT COUNT(*) as total FROM comments")
+    total_comments = cursor.fetchone()['total']
+    
+    # Flagged comments
+    cursor.execute("SELECT COUNT(*) as total FROM comments WHERE is_flagged = 1")
+    flagged_comments = cursor.fetchone()['total']
+    
+    # Top rated movies
+    cursor.execute('''
+        SELECT title, rating, genres 
+        FROM movies 
+        ORDER BY rating DESC 
+        LIMIT 10
+    ''')
+    top_rated_movies = [dict(row) for row in cursor.fetchall()]
+    
+    # Trending genres
+    cursor.execute('''
+        SELECT genres, COUNT(*) as count
+        FROM movies
+        WHERE genres IS NOT NULL
+        GROUP BY genres
+        ORDER BY count DESC
+        LIMIT 10
+    ''')
+    trending_genres = [dict(row) for row in cursor.fetchall()]
+    
+    # User engagement (interactions per user)
+    cursor.execute('''
+        SELECT COUNT(DISTINCT movie_title) as unique_movies_viewed,
+               COUNT(*) as total_interactions
+        FROM user_interactions
+    ''')
+    engagement = dict(cursor.fetchone())
+    
+    # Recent admin actions
+    cursor.execute('''
+        SELECT a.*, u.username as admin_username
+        FROM admin_actions a
+        LEFT JOIN users u ON a.admin_id = u.id
+        ORDER BY a.timestamp DESC
+        LIMIT 20
+    ''')
+    recent_actions = [dict(row) for row in cursor.fetchall()]
+    
+    conn.close()
+    
+    return {
+        "system_usage": {
+            "total_users": total_users,
+            "active_users": active_users,
+            "blocked_users": blocked_users,
+            "total_movies": total_movies,
+            "total_interactions": total_interactions,
+            "total_comments": total_comments,
+            "flagged_comments": flagged_comments
+        },
+        "top_rated_movies": top_rated_movies,
+        "trending_genres": trending_genres,
+        "user_engagement": engagement,
+        "recent_admin_actions": recent_actions
+    }
+
+# ============================================
+# USER ENDPOINTS - COMMENTS
+# ============================================
+
+@app.post("/comments")
+def create_comment(comment_data: CommentCreate, user_id: int = 1):
+    """Create a comment/review (requires authentication in production)"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT INTO comments (user_id, movie_title, comment_text, rating, is_approved, is_flagged)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (user_id, comment_data.movie_title, comment_data.comment_text, comment_data.rating, 1, 0))
+    
+    conn.commit()
+    comment_id = cursor.lastrowid
+    conn.close()
+    
+    return {"status": "success", "message": "Comment created successfully", "comment_id": comment_id}
+
+@app.get("/comments/{movie_title}")
+def get_movie_comments(movie_title: str):
+    """Get comments for a movie"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT c.*, u.username 
+        FROM comments c
+        LEFT JOIN users u ON c.user_id = u.id
+        WHERE c.movie_title = ? AND c.is_approved = 1 AND c.is_flagged = 0
+        ORDER BY c.created_at DESC
+    ''', (movie_title,))
+    
+    comments = cursor.fetchall()
+    conn.close()
+    
+    return [dict(comment) for comment in comments]
 
 # ============================================
 # RUN THE APPLICATION
