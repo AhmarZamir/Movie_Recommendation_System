@@ -60,8 +60,8 @@ Movie_Recommendation_System/
 2) Install and run:
 ```
 cd backend
-python -m venv .venv
-.\.venv\Scripts\activate
+py -3.12 -m venv .venv
+.\.venv\Scripts\activate.ps1
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
