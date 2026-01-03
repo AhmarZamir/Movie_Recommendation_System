@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* @layer base {
+  body {
+    @apply bg-[#0b0b0f] text-white;
+  }
+} */
+
+@layer base {
+  html, body, #root { height: 100%; }
+
+  body {
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+    color: white;
+
+    background:
+      radial-gradient(1100px 650px at 12% -10%,
+        rgba(139, 92, 246, 0.28) 0%,
+        rgba(139, 92, 246, 0.14) 35%,
+        rgba(139, 92, 246, 0.06) 55%,
+        transparent 75%
+      ),
+      radial-gradient(1000px 600px at 85% 5%,
+        rgba(236, 72, 153, 0.18) 0%,
+        rgba(236, 72, 153, 0.09) 40%,
+        rgba(236, 72, 153, 0.04) 60%,
+        transparent 80%
+      ),
+      linear-gradient(180deg, #12051b 0%, #0b0b0f 45%, #07070a 100%);
+
+    background-attachment: fixed;
+    background-repeat: no-repeat;
+    background-size: cover;
+    background-position: center;
+  }
+
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+}
